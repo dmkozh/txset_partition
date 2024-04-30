@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <iostream>
+#include <optional>
 #include <random>
 #include <string>
 #include <unordered_map>
@@ -66,21 +67,27 @@ class Stage {
  public:
   Stage(ParitionConfig cfg) : cfg_(cfg) {}
 
-  bool tryAdd(const Tx& tx) {
+  optional<int> tryAdd(const Tx& tx, bool do_add) {
     if (total_insns_ + tx.insns > cfg_.insnsPerStage()) {
-      return false;
+      return nullopt;
     }
 
     auto conflicting_clusters = getConflictingClusters(tx);
+    int conflicting_insns = 0;
+    for (const auto* c : conflicting_clusters) {
+      conflicting_insns += c->insns;
+    }
     auto new_clusters = createNewClusters(tx, conflicting_clusters);
     auto packing = binPacking(new_clusters);
     if (packing.empty()) {
-      return false;
+      return nullopt;
     }
-    clusters_ = new_clusters;
-    packing_ = packing;
-    total_insns_ += tx.insns;
-    return true;
+    if (do_add) {
+      clusters_ = new_clusters;
+      packing_ = packing;
+      total_insns_ += tx.insns;
+    }
+    return conflicting_insns;
   }
 
   vector<vector<int>> getPerThreadTxs() const { return packing_; }
@@ -161,11 +168,20 @@ TxSet partition(vector<Tx>& txs, ParitionConfig cfg) {
   sort(txs.begin(), txs.end(),
        [](const Tx& a, const Tx& b) { return a.fee > b.fee; });
   vector<Stage> stages(cfg.stage_count, cfg);
+
   for (const auto& tx : txs) {
+    int min_conflicting_insns = numeric_limits<int>::max();
+    Stage* best_stage = nullptr;
     for (auto& stage : stages) {
-      if (stage.tryAdd(tx)) {
-        break;
+      auto maybe_conflicting_insns = stage.tryAdd(tx, false);
+      if (maybe_conflicting_insns &&
+          *maybe_conflicting_insns < min_conflicting_insns) {
+        min_conflicting_insns = *maybe_conflicting_insns;
+        best_stage = &stage;
       }
+    }
+    if (best_stage != nullptr) {
+      best_stage->tryAdd(tx, true);
     }
   }
   unordered_map<int, const Tx*> tx_map;
@@ -217,7 +233,7 @@ vector<Tx> oracle(Oracle const& config) { return {}; }
 vector<Tx> random(Random const& config, int64_t& generatedInsns) {
   mt19937 gen(123);
 
-  normal_distribution<> insDist(20'000'000, 15'000'000);
+  normal_distribution<> insDist(20'000'000, 5'000'000);
 
   uniform_int_distribution<> feeDist(100, 1'000'000);
   uniform_int_distribution<> footprintSizeDist(2, config.max_footprint_entries);
@@ -290,7 +306,7 @@ int main() {
   cfg.threads_per_stage = 8;
   cfg.insns_per_thread = 125'000'000;
 
-  auto genConfig = randomTxsConfig(cfg.maxInsns() * 2, 0.05, 0.05);
+  auto genConfig = randomTxsConfig(cfg.maxInsns() * 2, 0.05, 0.02);
 
   int64_t generated_insns = 0;
   auto txs = generate(genConfig, generated_insns);
