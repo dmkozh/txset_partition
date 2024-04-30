@@ -190,12 +190,10 @@ TxSet partition(vector<Tx>& txs, ParitionConfig cfg) {
   }
   TxSet res;
   for (const auto& stage : stages) {
-    res.stages.emplace_back();
-    auto& tx_set_stage = res.stages.back();
+    auto& tx_set_stage = res.stages.emplace_back();
     auto stage_txs = stage.getPerThreadTxs();
     for (const auto& thread : stage_txs) {
-      tx_set_stage.txs.emplace_back();
-      auto& tx_set_thread = tx_set_stage.txs.back();
+      auto& tx_set_thread = tx_set_stage.txs.emplace_back();
       for (int tx_id : thread) {
         tx_set_thread.push_back(*tx_map[tx_id]);
         tx_map.erase(tx_id);
@@ -246,8 +244,7 @@ vector<Tx> random(Random const& config, int64_t& generatedInsns) {
   int txId = 0;
   while (generatedInsns < config.total_insns) {
     int insns = max(500'000, min(100'000'000, static_cast<int>(insDist(gen))));
-    res.emplace_back(txId++, insns, feeDist(gen));
-    auto& tx = res.back();
+    auto& tx = res.emplace_back(txId++, insns, feeDist(gen));
     generatedInsns += tx.insns;
     int footprintSize = footprintSizeDist(gen);
     uniform_int_distribution<> rwCountDistr(
