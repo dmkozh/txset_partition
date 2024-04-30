@@ -61,16 +61,16 @@ random(Random const& config)
     std::random_device rd;
     std::mt19937 gen(rd());
 
-    std::uniform_int_distribution<> insFeeDist(1, INT32_MAX);
+    std::normal_distribution<double> insDist(20'000'000, 5'000'000);
+    std::uniform_int_distribution<> feeDist(1, INT32_MAX);
     std::uniform_int_distribution<> entryDist(0, config.entry_range);
     std::uniform_int_distribution<> footprintSizeDist(1, config.footprint_entry_limit);
 
     vector<Tx> res;
     for(size_t i = 0; i < config.num_txs; ++i)
     {   
-        res.push_back({static_cast<int>(i), insFeeDist(gen), insFeeDist(gen), {}, {}});
+        res.push_back({static_cast<int>(i), static_cast<int>(insDist(gen)), feeDist(gen), {}, {}});
         
-
         std::generate_n(std::back_inserter(res.back().read_only), footprintSizeDist(gen), [&]{ return entryDist(gen); });
         std::generate_n(std::back_inserter(res.back().read_write), footprintSizeDist(gen), [&]{ return entryDist(gen); });
     }
