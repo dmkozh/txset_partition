@@ -50,6 +50,31 @@ struct TxSetStage {
 
 struct TxSet {
   vector<TxSetStage> stages;
+
+  void validate() {
+    for (const auto& stage : stages) {
+      unordered_set<int> ro;
+      unordered_set<int> rw;
+      for (const auto& thread : stage.txs) {
+        for (const auto& tx : thread) {
+          for (int ro_entry : tx.read_only) {
+            if (ro.count(ro_entry) > 0) {
+              throw runtime_error("RO conflict");
+            }
+          }
+          for (int rw_entry : tx.read_write) {
+            if (ro.count(rw_entry) > 0 || rw.count(rw_entry) > 0) {
+              throw runtime_error("RW conflict");
+            }
+          }
+        }
+        for (const auto& tx : thread) {
+          ro.insert(tx.read_only.begin(), tx.read_only.end());
+          rw.insert(tx.read_write.begin(), tx.read_write.end());
+        }
+      }
+    }
+  }
 };
 
 struct PartitionConfig {
@@ -321,6 +346,7 @@ void smokeTest(PartitionConfig cfg) {
     auto start = high_resolution_clock::now();
     auto tx_set = partition(txs, cfg);
     auto stop = high_resolution_clock::now();
+    tx_set.validate();
     auto duration = duration_cast<milliseconds>(stop - start);
     cout << "Partition time: " << duration.count() << " ms" << endl;
     int64_t insns_left = 0;
