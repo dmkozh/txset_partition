@@ -106,6 +106,7 @@ class Stage {
       for (int rw : tx.read_write) {
         if (cluster.read_only.count(rw) > 0 ||
             cluster.read_write.count(rw) > 0) {
+          // if (cluster.read_write.count(rw) > 0) {
           is_conflicting = true;
           break;
         }
@@ -167,6 +168,8 @@ class Stage {
 TxSet partition(vector<Tx>& txs, ParitionConfig cfg) {
   sort(txs.begin(), txs.end(),
        [](const Tx& a, const Tx& b) { return a.fee > b.fee; });
+   //sort(txs.begin(), txs.end(),
+   //     [](const Tx& a, const Tx& b) { return a.insns > b.insns; });
   vector<Stage> stages(cfg.stage_count, cfg);
 
   for (const auto& tx : txs) {
@@ -210,94 +213,87 @@ TxSet partition(vector<Tx>& txs, ParitionConfig cfg) {
   return res;
 }
 
-struct Random {
+struct Conflict {
+  double fraction_of_txs_ro;
+  double fraction_of_txs_rw;
+
+  Conflict(double fraction_of_txs_ro, double fraction_of_txs_rw)
+      : fraction_of_txs_ro(fraction_of_txs_ro),
+        fraction_of_txs_rw(fraction_of_txs_rw) {}
+};
+
+struct PredefinedConflictsConfig {
   int64_t total_insns;
-  int max_footprint_entries;
-  int max_footprint_rw_entries;
-  double ro_to_rw_conflict_prob;
-  double rw_to_rw_conflict_prob;
+  double conflicts_per_tx;
+  double mean_ro_entries_per_conflict;
+  double mean_rw_entries_per_conflict;
+  vector<Conflict> additional_conflicts;
 };
 
-struct Oracle {};
-
-struct Config {
-  enum { RANDOM, ORACLE } tag;
-  union {
-    Random random;
-    Oracle oracle;
-  };
-};
-
-vector<Tx> oracle(Oracle const& config) { return {}; }
-
-vector<Tx> random(Random const& config, int64_t& generatedInsns) {
+vector<Tx> generatePredefinedConflicts(PredefinedConflictsConfig const& config,
+                                       int64_t& generated_insns) {
   mt19937 gen(123);
 
-  normal_distribution<> insDist(20'000'000, 5'000'000);
+  normal_distribution<> insn_distr(20'000'000, 5'000'000);
 
-  uniform_int_distribution<> feeDist(100, 1'000'000);
-  uniform_int_distribution<> footprintSizeDist(2, config.max_footprint_entries);
+  uniform_int_distribution<> fee_distr(100, 1'000'000);
 
   vector<Tx> res;
-  int entryId = 0;
-  generatedInsns = 0;
+  int entry_id = 0;
+  generated_insns = 0;
   int txId = 0;
-  while (generatedInsns < config.total_insns) {
-    int insns = max(500'000, min(100'000'000, static_cast<int>(insDist(gen))));
-    auto& tx = res.emplace_back(txId++, insns, feeDist(gen));
-    generatedInsns += tx.insns;
-    int footprintSize = footprintSizeDist(gen);
-    uniform_int_distribution<> rwCountDistr(
-        1, min(footprintSize, config.max_footprint_rw_entries));
-    int rwCount = rwCountDistr(gen);
-    int roCount = footprintSize - rwCount;
-    for (int i = 0; i < roCount; ++i) {
-      tx.read_only.push_back(entryId++);
-    }
-    for (int i = 0; i < rwCount; ++i) {
-      tx.read_write.push_back(entryId++);
-    }
+  while (generated_insns < config.total_insns) {
+    int insns =
+        max(500'000, min(100'000'000, static_cast<int>(insn_distr(gen))));
+    auto& tx = res.emplace_back(txId++, insns, fee_distr(gen));
+    generated_insns += tx.insns;
   }
 
-  uniform_real_distribution<> probDistr;
-  for (int i = 0; i < res.size(); ++i) {
-    for (int j = i + 1; j < res.size(); ++j) {
-      double p = probDistr(gen);
-      uniform_int_distribution<> fpDistr(0, res[i].read_write.size() - 1);
-
-      if (p < config.ro_to_rw_conflict_prob) {
-        res[j].read_only.push_back(res[i].read_write[fpDistr(gen)]);
-      } else if (p < config.ro_to_rw_conflict_prob +
-                         config.rw_to_rw_conflict_prob) {
-        res[j].read_write.push_back(res[i].read_write[fpDistr(gen)]);
-      }
+  int conflict_count = round(config.conflicts_per_tx * res.size());
+  poisson_distribution<> ro_count_distr(config.mean_ro_entries_per_conflict);
+  poisson_distribution<> rw_count_distr(config.mean_rw_entries_per_conflict);
+  auto generateConflict = [&](int from, int ro_count, int rw_count) {
+    ++entry_id;
+    for (int j = from; j < from + ro_count; ++j) {
+      res[j].read_only.push_back(entry_id);
     }
+    for (int j = from + ro_count; j < from + ro_count + rw_count; ++j) {
+      res[j].read_write.push_back(entry_id);
+    }
+    res[from + ro_count + rw_count - 1].fee += 1'000'000;
+  };
+  while (conflict_count > 0) {
+    shuffle(res.begin(), res.end(), gen);
+    int roCount = ro_count_distr(gen);
+    int rwCount = max(1, rw_count_distr(gen));
+    generateConflict(0, roCount, rwCount);
+    conflict_count -= roCount + rwCount;
+  }
+  shuffle(res.begin(), res.end(), gen);
+  int from_id = 0;
+  for (const auto& conflict : config.additional_conflicts) {
+    int ro_count = conflict.fraction_of_txs_ro * res.size();
+    int rw_count =
+        max(1, static_cast<int>(conflict.fraction_of_txs_rw * res.size()));
+    generateConflict(from_id, ro_count, rw_count);
+    from_id += ro_count + rw_count;
   }
 
   return res;
 }
 
-vector<Tx> generate(Config const& config, int64_t& generatedInsns) {
-  switch (config.tag) {
-    case Config::RANDOM:
-      return random(config.random, generatedInsns);
-      break;
-
-    default:
-      break;
-  }
-}
-
-Config randomTxsConfig(int64_t max_insns, double ro_to_rw_conflict_prob,
-                       double rw_to_rw_conflict_prob) {
-  Config cfg;
-  cfg.tag = Config::RANDOM;
-  cfg.random.max_footprint_entries = 65;
-  cfg.random.max_footprint_rw_entries = 25;
-  cfg.random.total_insns = max_insns;
-  cfg.random.ro_to_rw_conflict_prob = ro_to_rw_conflict_prob;
-  cfg.random.rw_to_rw_conflict_prob = rw_to_rw_conflict_prob;
-  return cfg;
+vector<Tx> predefinedConflicts(int64_t max_insns, double conflicts_per_tx,
+                               double mean_ro_entries_per_conflict,
+                               double mean_rw_entries_per_conflict,
+                               vector<Conflict> additional_conflicts,
+                               int64_t& generated_insns) {
+  PredefinedConflictsConfig cfg;
+  cfg.total_insns = max_insns;
+  cfg.conflicts_per_tx = conflicts_per_tx;
+  cfg.mean_ro_entries_per_conflict = mean_ro_entries_per_conflict;
+  cfg.mean_rw_entries_per_conflict = mean_rw_entries_per_conflict;
+  cfg.additional_conflicts = additional_conflicts;
+  return generatePredefinedConflicts(cfg, generated_insns);
 }
 
 int main() {
@@ -306,10 +302,14 @@ int main() {
   cfg.threads_per_stage = 8;
   cfg.insns_per_thread = 125'000'000;
 
-  auto genConfig = randomTxsConfig(cfg.maxInsns() * 2, 0.05, 0.02);
-
   int64_t generated_insns = 0;
-  auto txs = generate(genConfig, generated_insns);
+  // Oracles
+  // auto txs = predefinedConflicts(cfg.maxInsns() * 2, 0.5, 10, 2,
+  //                               {Conflict(0.25, 0), Conflict(0.25, 0)},
+  //                               generated_insns);
+  // Arbitrage
+  auto txs = predefinedConflicts(cfg.maxInsns() * 2, 0.5, 10, 2,
+                                 {Conflict(0.0, 0.8)}, generated_insns);
   cout << "Tx count: " << txs.size() << endl;
   int iter = 0;
   while (!txs.empty()) {
@@ -324,6 +324,8 @@ int main() {
     }
     cout << "Init percent left: " << 100.0 * insns_left / generated_insns
          << endl;
+    cout << "Utilization: "
+         << 100.0 * (generated_insns - insns_left) / cfg.maxInsns() << endl;
     ++iter;
   }
   cout << "Total iter: " << iter << endl;
