@@ -58,7 +58,7 @@ struct TxSet {
       for (const auto& thread : stage.txs) {
         for (const auto& tx : thread) {
           for (int ro_entry : tx.read_only) {
-            if (ro.count(ro_entry) > 0) {
+            if (rw.count(ro_entry) > 0) {
               throw runtime_error("RO conflict");
             }
           }
@@ -369,7 +369,8 @@ double benchmark(const PartitionConfig& partition_cfg,
   for (int iter = 0; iter < ITERATIONS; ++iter) {
     int64_t generated_insns = 0;
     auto txs = generatePredefinedConflicts(gen_cfg, generated_insns, iter);
-    partition(txs, partition_cfg);
+    auto tx_set = partition(txs, partition_cfg);
+    tx_set.validate();
     int64_t insns_left = 0;
     for (const auto& tx : txs) {
       insns_left += tx.insns;
@@ -415,6 +416,24 @@ void randomTrafficBenchmarks() {
         }
         out << endl;
       }
+    }
+  }
+}
+
+void randomTrafficBenchmarksRw() {
+  ofstream out("random_traffic_rw.csv");
+  out << "conflicts_per_tx,mean_rw_entries_per_"
+         "conflict,1_stage,2_stage,3_stage,4_stage"
+      << endl;
+  for (int conflicts_per_tx = 1; conflicts_per_tx <= 10; ++conflicts_per_tx) {
+    for (int mean_rw_entries = 5; mean_rw_entries <= 30; ++mean_rw_entries) {
+      out << conflicts_per_tx << "," << mean_rw_entries << ",";
+      auto stage_benchmarks = stageBenchmarks(
+          predefinedConflicts(conflicts_per_tx, 0, mean_rw_entries, {}));
+      for (double v : stage_benchmarks) {
+        out << v << ",";
+      }
+      out << endl;
     }
   }
 }
@@ -480,8 +499,9 @@ int main() {
   //      << endl;
 
   randomTrafficBenchmarks();
+  randomTrafficBenchmarksRw();
   oracleBenchmarks();
   arbitrageBenchmarks();
 
-  // smokeTest(partitionConfig(4));
+   //smokeTest(partitionConfig(4));
 }
