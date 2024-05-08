@@ -104,7 +104,8 @@ class Stage {
       conflicting_insns += c->insns;
     }
     auto new_clusters = createNewClusters(tx, conflicting_clusters);
-    auto packing = binPacking(new_clusters);
+    vector<int> new_bin_insns;
+    auto packing = binPacking(new_clusters, new_bin_insns);
     if (packing.empty()) {
       return nullopt;
     }
@@ -112,6 +113,7 @@ class Stage {
       clusters_ = new_clusters;
       packing_ = packing;
       total_insns_ += tx.insns;
+      bin_insns_ = new_bin_insns;
     }
     return conflicting_insns;
   }
@@ -164,10 +166,11 @@ class Stage {
     return new_clusters;
   }
 
-  vector<vector<int>> binPacking(const vector<Cluster>& clusters) const {
+  vector<vector<int>> binPacking(const vector<Cluster>& clusters,
+                                 vector<int>& bin_insns) const {
     const int bin_count = cfg_.threads_per_stage;
     vector<vector<int>> bins(bin_count);
-    vector<int> bin_insns(bin_count);
+    bin_insns.resize(bin_count);
     for (const auto& cluster : clusters) {
       bool packed = false;
       for (int i = 0; i < bin_count; ++i) {
@@ -187,6 +190,7 @@ class Stage {
 
   vector<Cluster> clusters_;
   vector<vector<int>> packing_;
+  vector<int> bin_insns_;
   int64_t total_insns_ = 0;
   PartitionConfig cfg_;
 };
@@ -202,17 +206,17 @@ TxSet partition(vector<Tx>& txs, PartitionConfig cfg) {
     int min_conflicting_insns = numeric_limits<int>::max();
     Stage* best_stage = nullptr;
     for (auto& stage : stages) {
-      auto maybe_conflicting_insns = stage.tryAdd(tx, false);
+      auto maybe_conflicting_insns = stage.tryAdd(tx, true);
       if (maybe_conflicting_insns &&
           *maybe_conflicting_insns < min_conflicting_insns) {
         min_conflicting_insns = *maybe_conflicting_insns;
         best_stage = &stage;
-        // break;
+        break;
       }
     }
-    if (best_stage != nullptr) {
-      best_stage->tryAdd(tx, true);
-    }
+    // if (best_stage != nullptr) {
+    //   best_stage->tryAdd(tx, true);
+    // }
   }
   unordered_map<int, const Tx*> tx_map;
   for (const auto& tx : txs) {
@@ -242,7 +246,7 @@ TxSet partition(vector<Tx>& txs, PartitionConfig cfg) {
 
 const int64_t INSNS_PER_THREAD = 500'000'000;
 const int64_t THREADS = 8;
-const int64_t INSNS_PER_LEDGER = INSNS_PER_THREAD * THREADS;
+const int64_t INSNS_PER_LEDGER = 2 * INSNS_PER_THREAD * THREADS;
 
 struct Conflict {
   double fraction_of_txs_ro;
@@ -320,7 +324,7 @@ PredefinedConflictsConfig predefinedConflicts(
     vector<Conflict> additional_conflicts) {
   PredefinedConflictsConfig cfg;
   cfg.total_insns = INSNS_PER_LEDGER * 2;
-  // cfg.total_insns = INSNS_PER_LEDGER;
+   //cfg.total_insns = INSNS_PER_LEDGER;
   cfg.conflicts_per_tx = conflicts_per_tx;
   cfg.mean_ro_entries_per_conflict = mean_ro_entries_per_conflict;
   cfg.mean_rw_entries_per_conflict = mean_rw_entries_per_conflict;
@@ -331,15 +335,15 @@ PredefinedConflictsConfig predefinedConflicts(
 void smokeTest(PartitionConfig cfg) {
   int64_t generated_insns = 0;
   // Oracles
-  // auto txs = predefinedConflicts(cfg.maxInsns() * 2, 0.5, 10, 2,
-  //                               {Conflict(0.25, 0), Conflict(0.25, 0)},
-  //                               generated_insns);
+   auto txs = generatePredefinedConflicts(
+     predefinedConflicts(10, 50, 5, {Conflict(0.9, 0.0)}), generated_insns,
+     123);
   // Arbitrage
-  auto txs = generatePredefinedConflicts(
-      predefinedConflicts(1, 10, 1, {Conflict(0.0, 0.8)}), generated_insns,
-      123);
-  // auto txs = generatePredefinedConflicts(predefinedConflicts(1, 10, 2, {}),
-  //                                        generated_insns, 123);
+   //auto txs = generatePredefinedConflicts(
+   //   predefinedConflicts(10, 50, 5, {Conflict(0.0, 0.8)}), generated_insns,
+   //   123);
+  //auto txs = generatePredefinedConflicts(predefinedConflicts(10, 10, 5, {}),
+  //                                       generated_insns, 123);
   cout << "Tx count: " << txs.size() << endl;
   int iter = 0;
   while (!txs.empty()) {
@@ -403,10 +407,12 @@ void randomTrafficBenchmarks() {
   out << "conflicts_per_tx,mean_ro_entries_per_conflict,mean_rw_entries_per_"
          "conflict,1_stage,2_stage,3_stage,4_stage"
       << endl;
-  for (int conflicts_per_tx = 1; conflicts_per_tx <= 10; ++conflicts_per_tx) {
+  for (int conflicts_per_tx = 0; conflicts_per_tx <= 50;
+       conflicts_per_tx += 5) {
     for (int mean_ro_entries = 10; mean_ro_entries <= 50;
          mean_ro_entries += 10) {
-      for (int mean_rw_entries = 1; mean_rw_entries <= 5; ++mean_rw_entries) {
+      for (int mean_rw_entries = 1; mean_rw_entries <= 5;
+           mean_rw_entries += 2) {
         out << conflicts_per_tx << "," << mean_ro_entries << ","
             << mean_rw_entries << ",";
         auto stage_benchmarks = stageBenchmarks(predefinedConflicts(
@@ -425,8 +431,9 @@ void randomTrafficBenchmarksRw() {
   out << "conflicts_per_tx,mean_rw_entries_per_"
          "conflict,1_stage,2_stage,3_stage,4_stage"
       << endl;
-  for (int conflicts_per_tx = 1; conflicts_per_tx <= 10; ++conflicts_per_tx) {
-    for (int mean_rw_entries = 5; mean_rw_entries <= 30; ++mean_rw_entries) {
+  for (int conflicts_per_tx = 0; conflicts_per_tx <= 50;
+       conflicts_per_tx += 5) {
+    for (int mean_rw_entries = 5; mean_rw_entries <= 30; mean_rw_entries += 5) {
       out << conflicts_per_tx << "," << mean_rw_entries << ",";
       auto stage_benchmarks = stageBenchmarks(
           predefinedConflicts(conflicts_per_tx, 0, mean_rw_entries, {}));
@@ -443,16 +450,16 @@ void oracleBenchmarks() {
   out << "num_oracles,read_tx_fraction,1_stage,2_stage,3_stage,4_stage" << endl;
   const int ReadTxFractionStep = 0.2;
   for (int num_oracles = 1; num_oracles <= 3; ++num_oracles) {
-    for (int read_tx_fraction_mult = 1; read_tx_fraction_mult <= 4;
+    for (int read_tx_fraction_mult = 1; read_tx_fraction_mult <= 3;
          ++read_tx_fraction_mult) {
-      double read_tx_fraction = read_tx_fraction_mult * 0.2;
+      double read_tx_fraction = read_tx_fraction_mult * 0.3;
       out << num_oracles << "," << read_tx_fraction << ",";
       vector<Conflict> oracles;
       for (int i = 0; i < num_oracles; ++i) {
         oracles.emplace_back(read_tx_fraction / num_oracles, 0.0);
       }
       auto stage_benchmarks =
-          stageBenchmarks(predefinedConflicts(1, 10, 1, oracles));
+          stageBenchmarks(predefinedConflicts(10, 50, 5, oracles));
       for (double v : stage_benchmarks) {
         out << v << ",";
       }
@@ -466,9 +473,9 @@ void arbitrageBenchmarks() {
   out << "txs_fraction,conflict_clusters,1_stage,2_stage,3_stage,4_stage"
       << endl;
   const int ReadTxFractionStep = 0.2;
-  for (int txs_fraction_mult = 1; txs_fraction_mult <= 4; ++txs_fraction_mult) {
-    double txs_fraction = txs_fraction_mult * 0.2;
-    for (int conflict_clusters = 1; conflict_clusters <= 10;
+  for (int txs_fraction_mult = 1; txs_fraction_mult <= 9; ++txs_fraction_mult) {
+    double txs_fraction = txs_fraction_mult * 0.1;
+    for (int conflict_clusters = 1; conflict_clusters <= 3;
          conflict_clusters += 2) {
       out << txs_fraction << "," << conflict_clusters << ",";
       vector<Conflict> conflicts;
@@ -476,7 +483,7 @@ void arbitrageBenchmarks() {
         conflicts.emplace_back(0.0, txs_fraction / conflict_clusters);
       }
       auto stage_benchmarks =
-          stageBenchmarks(predefinedConflicts(1, 10, 1, conflicts));
+          stageBenchmarks(predefinedConflicts(10, 50, 5, conflicts));
       for (double v : stage_benchmarks) {
         out << v << ",";
       }
@@ -499,9 +506,9 @@ int main() {
   //      << endl;
 
   randomTrafficBenchmarks();
-  randomTrafficBenchmarksRw();
-  oracleBenchmarks();
-  arbitrageBenchmarks();
+  //randomTrafficBenchmarksRw();
+  //oracleBenchmarks();
+  //arbitrageBenchmarks();
 
    //smokeTest(partitionConfig(4));
 }
