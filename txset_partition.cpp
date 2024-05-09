@@ -324,7 +324,7 @@ PredefinedConflictsConfig predefinedConflicts(
     vector<Conflict> additional_conflicts) {
   PredefinedConflictsConfig cfg;
   cfg.total_insns = INSNS_PER_LEDGER * 2;
-   //cfg.total_insns = INSNS_PER_LEDGER;
+  // cfg.total_insns = INSNS_PER_LEDGER;
   cfg.conflicts_per_tx = conflicts_per_tx;
   cfg.mean_ro_entries_per_conflict = mean_ro_entries_per_conflict;
   cfg.mean_rw_entries_per_conflict = mean_rw_entries_per_conflict;
@@ -335,15 +335,15 @@ PredefinedConflictsConfig predefinedConflicts(
 void smokeTest(PartitionConfig cfg) {
   int64_t generated_insns = 0;
   // Oracles
-   auto txs = generatePredefinedConflicts(
-     predefinedConflicts(10, 50, 5, {Conflict(0.9, 0.0)}), generated_insns,
-     123);
+  auto txs = generatePredefinedConflicts(
+      predefinedConflicts(10, 50, 5, {Conflict(0.9, 0.0)}), generated_insns,
+      123);
   // Arbitrage
-   //auto txs = generatePredefinedConflicts(
-   //   predefinedConflicts(10, 50, 5, {Conflict(0.0, 0.8)}), generated_insns,
-   //   123);
-  //auto txs = generatePredefinedConflicts(predefinedConflicts(10, 10, 5, {}),
-  //                                       generated_insns, 123);
+  // auto txs = generatePredefinedConflicts(
+  //   predefinedConflicts(10, 50, 5, {Conflict(0.0, 0.8)}), generated_insns,
+  //   123);
+  // auto txs = generatePredefinedConflicts(predefinedConflicts(10, 10, 5, {}),
+  //                                        generated_insns, 123);
   cout << "Tx count: " << txs.size() << endl;
   int iter = 0;
   while (!txs.empty()) {
@@ -506,9 +506,9 @@ int main() {
   //      << endl;
 
   randomTrafficBenchmarks();
-  //randomTrafficBenchmarksRw();
-  //oracleBenchmarks();
-  //arbitrageBenchmarks();
+  // randomTrafficBenchmarksRw();
+  // oracleBenchmarks();
+  // arbitrageBenchmarks();
 
-   //smokeTest(partitionConfig(4));
+  // smokeTest(partitionConfig(4));
 }
