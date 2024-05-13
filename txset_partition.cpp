@@ -450,7 +450,7 @@ void oracleBenchmarks() {
   out << "num_oracles,read_tx_fraction,1_stage,2_stage,3_stage,4_stage" << endl;
   const int ReadTxFractionStep = 0.2;
   for (int num_oracles = 1; num_oracles <= 3; ++num_oracles) {
-    for (int read_tx_fraction_mult = 1; read_tx_fraction_mult <= 3;
+    for (int read_tx_fraction_mult = 0; read_tx_fraction_mult <= 3;
          ++read_tx_fraction_mult) {
       double read_tx_fraction = read_tx_fraction_mult * 0.3;
       out << num_oracles << "," << read_tx_fraction << ",";
@@ -459,7 +459,7 @@ void oracleBenchmarks() {
         oracles.emplace_back(read_tx_fraction / num_oracles, 0.0);
       }
       auto stage_benchmarks =
-          stageBenchmarks(predefinedConflicts(10, 50, 5, oracles));
+          stageBenchmarks(predefinedConflicts(5, 30, 5, oracles));
       for (double v : stage_benchmarks) {
         out << v << ",";
       }
@@ -473,7 +473,7 @@ void arbitrageBenchmarks() {
   out << "txs_fraction,conflict_clusters,1_stage,2_stage,3_stage,4_stage"
       << endl;
   const int ReadTxFractionStep = 0.2;
-  for (int txs_fraction_mult = 1; txs_fraction_mult <= 9; ++txs_fraction_mult) {
+  for (int txs_fraction_mult = 0; txs_fraction_mult <= 9; ++txs_fraction_mult) {
     double txs_fraction = txs_fraction_mult * 0.1;
     for (int conflict_clusters = 1; conflict_clusters <= 3;
          conflict_clusters += 2) {
@@ -483,7 +483,7 @@ void arbitrageBenchmarks() {
         conflicts.emplace_back(0.0, txs_fraction / conflict_clusters);
       }
       auto stage_benchmarks =
-          stageBenchmarks(predefinedConflicts(10, 50, 5, conflicts));
+          stageBenchmarks(predefinedConflicts(5, 30, 5, conflicts));
       for (double v : stage_benchmarks) {
         out << v << ",";
       }
@@ -505,10 +505,10 @@ int main() {
   //                                            {Conflict(0.9, 0.0)}))
   //      << endl;
 
-  randomTrafficBenchmarks();
-  // randomTrafficBenchmarksRw();
-  // oracleBenchmarks();
-  // arbitrageBenchmarks();
+  // randomTrafficBenchmarks();
+  //  randomTrafficBenchmarksRw();
+  oracleBenchmarks();
+  arbitrageBenchmarks();
 
   // smokeTest(partitionConfig(4));
 }
