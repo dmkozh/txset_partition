@@ -4,10 +4,10 @@
 #include <iostream>
 #include <optional>
 #include <random>
-#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include "BitSet.h"
 
 using namespace std;
 using namespace chrono;
@@ -16,31 +16,31 @@ struct Tx {
   int tx_id = 0;
   int insns = 0;
   int fee = 0;
-  vector<int> read_only;
-  vector<int> read_write;
+  BitSet read_only;
+  BitSet read_write;
   Tx() = default;
   Tx(int tx_id, int insns, int fee) : tx_id(tx_id), insns(insns), fee(fee) {}
 };
 
 struct Cluster {
   int insns = 0;
-  unordered_set<int> read_only;
-  unordered_set<int> read_write;
-  vector<int> txs;
+  BitSet read_only;
+  BitSet read_write;
+  BitSet txs;
 
   Cluster() = default;
 
   explicit Cluster(const Tx& tx) : insns(tx.insns) {
-    read_only.insert(tx.read_only.begin(), tx.read_only.end());
-    read_write.insert(tx.read_write.begin(), tx.read_write.end());
-    txs.push_back(tx.tx_id);
+    read_only.inplaceUnion(tx.read_only);
+    read_write.inplaceUnion(tx.read_write);
+    txs.set(tx.tx_id);
   }
 
   void merge(const Cluster& other) {
     insns += other.insns;
-    read_only.insert(other.read_only.begin(), other.read_only.end());
-    read_write.insert(other.read_write.begin(), other.read_write.end());
-    txs.insert(txs.end(), other.txs.begin(), other.txs.end());
+    read_only.inplaceUnion(other.read_only);
+    read_write.inplaceUnion(other.read_write);
+    txs.inplaceUnion(other.txs);
   }
 };
 
@@ -53,24 +53,21 @@ struct TxSet {
 
   void validate() {
     for (const auto& stage : stages) {
-      unordered_set<int> ro;
-      unordered_set<int> rw;
+      BitSet ro;
+      BitSet rw;
       for (const auto& thread : stage.txs) {
         for (const auto& tx : thread) {
-          for (int ro_entry : tx.read_only) {
-            if (rw.count(ro_entry) > 0) {
+          if (tx.read_only.intersectionCount(rw) > 0) {
               throw runtime_error("RO conflict");
-            }
           }
-          for (int rw_entry : tx.read_write) {
-            if (ro.count(rw_entry) > 0 || rw.count(rw_entry) > 0) {
+          if (tx.read_write.intersectionCount(ro) > 0 ||
+              tx.read_write.intersectionCount(rw) > 0) {
               throw runtime_error("RW conflict");
-            }
           }
         }
         for (const auto& tx : thread) {
-          ro.insert(tx.read_only.begin(), tx.read_only.end());
-          rw.insert(tx.read_write.begin(), tx.read_write.end());
+          ro.inplaceUnion(tx.read_only);
+          rw.inplaceUnion(tx.read_write);
         }
       }
     }
@@ -118,27 +115,16 @@ class Stage {
     return conflicting_insns;
   }
 
-  vector<vector<int>> getPerThreadTxs() const { return packing_; }
+  vector<BitSet> getPerThreadTxs() const { return packing_; }
 
  private:
   unordered_set<const Cluster*> getConflictingClusters(const Tx& tx) const {
     unordered_set<const Cluster*> conflicting_clusters;
     for (const Cluster& cluster : clusters_) {
-      bool is_conflicting = false;
-      for (int ro : tx.read_only) {
-        if (cluster.read_write.count(ro) > 0) {
-          is_conflicting = true;
-          break;
-        }
-      }
-      for (int rw : tx.read_write) {
-        if (cluster.read_only.count(rw) > 0 ||
-            cluster.read_write.count(rw) > 0) {
-          // if (cluster.read_write.count(rw) > 0) {
-          is_conflicting = true;
-          break;
-        }
-      }
+      bool is_conflicting =
+        tx.read_only.intersectionCount(cluster.read_write) > 0 ||
+        tx.read_write.intersectionCount(cluster.read_only) > 0 ||
+        tx.read_write.intersectionCount(cluster.read_write) > 0;
       if (is_conflicting) {
         conflicting_clusters.insert(&cluster);
       }
@@ -166,36 +152,37 @@ class Stage {
     return new_clusters;
   }
 
-  vector<vector<int>> binPacking(const vector<Cluster>& clusters,
+  vector<BitSet> binPacking(const vector<Cluster>& clusters,
                                  vector<int>& bin_insns) const {
     const int bin_count = cfg_.threads_per_stage;
-    vector<vector<int>> bins(bin_count);
+    vector<BitSet> bins(bin_count);
     bin_insns.resize(bin_count);
     for (const auto& cluster : clusters) {
       bool packed = false;
       for (int i = 0; i < bin_count; ++i) {
         if (bin_insns[i] + cluster.insns <= cfg_.insns_per_thread) {
           bin_insns[i] += cluster.insns;
-          bins[i].insert(bins[i].end(), cluster.txs.begin(), cluster.txs.end());
+          bins[i].inplaceUnion(cluster.txs);
           packed = true;
           break;
         }
       }
       if (!packed) {
-        return vector<vector<int>>();
+        return vector<BitSet>();
       }
     }
     return bins;
   }
 
   vector<Cluster> clusters_;
-  vector<vector<int>> packing_;
+  vector<BitSet> packing_;
   vector<int> bin_insns_;
   int64_t total_insns_ = 0;
   PartitionConfig cfg_;
 };
 
 TxSet partition(vector<Tx>& txs, PartitionConfig cfg) {
+  steady_clock::time_point start = steady_clock::now();
   sort(txs.begin(), txs.end(),
        [](const Tx& a, const Tx& b) { return a.fee > b.fee; });
   // sort(txs.begin(), txs.end(),
@@ -228,7 +215,7 @@ TxSet partition(vector<Tx>& txs, PartitionConfig cfg) {
     auto stage_txs = stage.getPerThreadTxs();
     for (const auto& thread : stage_txs) {
       auto& tx_set_thread = tx_set_stage.txs.emplace_back();
-      for (int tx_id : thread) {
+       for (size_t tx_id = 0; thread.nextSet(tx_id); ++tx_id) {
         tx_set_thread.push_back(*tx_map[tx_id]);
         tx_map.erase(tx_id);
       }
@@ -241,6 +228,9 @@ TxSet partition(vector<Tx>& txs, PartitionConfig cfg) {
     }
   }
   txs = new_txs;
+  steady_clock::time_point end = steady_clock::now();
+  printf("Partitioned %lu transactions in %d stages in %lu ms\n", txs.size(),
+         cfg.stage_count, duration_cast<milliseconds>(end - start).count());
   return res;
 }
 
@@ -291,10 +281,10 @@ vector<Tx> generatePredefinedConflicts(PredefinedConflictsConfig const& config,
   auto generateConflict = [&](int from, int ro_count, int rw_count) {
     ++entry_id;
     for (int j = from; j < from + ro_count; ++j) {
-      res[j].read_only.push_back(entry_id);
+      res[j].read_only.set(entry_id);
     }
     for (int j = from + ro_count; j < from + ro_count + rw_count; ++j) {
-      res[j].read_write.push_back(entry_id);
+      res[j].read_write.set(entry_id);
     }
     res[from + ro_count + rw_count - 1].fee += 1'000'000;
   };
