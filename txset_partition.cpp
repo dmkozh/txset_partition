@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
 #include "BitSet.h"
 
 using namespace std;
@@ -27,6 +28,7 @@ struct Cluster {
   BitSet read_only;
   BitSet read_write;
   BitSet txs;
+  int bin_id = -1;
 
   Cluster() = default;
 
@@ -58,11 +60,11 @@ struct TxSet {
       for (const auto& thread : stage.txs) {
         for (const auto& tx : thread) {
           if (tx.read_only.intersectionCount(rw) > 0) {
-              throw runtime_error("RO conflict");
+            throw runtime_error("RO conflict");
           }
           if (tx.read_write.intersectionCount(ro) > 0 ||
               tx.read_write.intersectionCount(rw) > 0) {
-              throw runtime_error("RW conflict");
+            throw runtime_error("RW conflict");
           }
         }
         for (const auto& tx : thread) {
@@ -88,31 +90,38 @@ struct PartitionConfig {
 
 class Stage {
  public:
-  Stage(PartitionConfig cfg) : cfg_(cfg) {}
+  Stage(PartitionConfig cfg) : cfg_(cfg) {
+    packing_.resize(cfg_.threads_per_stage);
+    bin_insns_.resize(cfg_.threads_per_stage);
+  }
 
-  optional<int> tryAdd(const Tx& tx, bool do_add) {
+  bool tryAdd(const Tx& tx) {
     if (total_insns_ + tx.insns > cfg_.insnsPerStage()) {
-      return nullopt;
+      return false;
     }
 
     auto conflicting_clusters = getConflictingClusters(tx);
-    int conflicting_insns = 0;
-    for (const auto* c : conflicting_clusters) {
-      conflicting_insns += c->insns;
+
+    bool packed = false;
+    auto new_clusters = createNewClusters(tx, conflicting_clusters, packed);
+    if (new_clusters.back().insns > cfg_.insns_per_thread) {
+      return false;
     }
-    auto new_clusters = createNewClusters(tx, conflicting_clusters);
+    if (packed) {
+      clusters_ = new_clusters;
+      total_insns_ += tx.insns;
+      return true;
+    }
     vector<int> new_bin_insns;
     auto packing = binPacking(new_clusters, new_bin_insns);
     if (packing.empty()) {
-      return nullopt;
+      return false;
     }
-    if (do_add) {
-      clusters_ = new_clusters;
-      packing_ = packing;
-      total_insns_ += tx.insns;
-      bin_insns_ = new_bin_insns;
-    }
-    return conflicting_insns;
+    clusters_ = new_clusters;
+    packing_ = packing;
+    total_insns_ += tx.insns;
+    bin_insns_ = new_bin_insns;
+    return true;
   }
 
   vector<BitSet> getPerThreadTxs() const { return packing_; }
@@ -122,9 +131,9 @@ class Stage {
     unordered_set<const Cluster*> conflicting_clusters;
     for (const Cluster& cluster : clusters_) {
       bool is_conflicting =
-        tx.read_only.intersectionCount(cluster.read_write) > 0 ||
-        tx.read_write.intersectionCount(cluster.read_only) > 0 ||
-        tx.read_write.intersectionCount(cluster.read_write) > 0;
+          tx.read_only.intersectionCount(cluster.read_write) > 0 ||
+          tx.read_write.intersectionCount(cluster.read_only) > 0 ||
+          tx.read_write.intersectionCount(cluster.read_write) > 0;
       if (is_conflicting) {
         conflicting_clusters.insert(&cluster);
       }
@@ -133,8 +142,8 @@ class Stage {
   }
 
   vector<Cluster> createNewClusters(
-      const Tx& tx,
-      const unordered_set<const Cluster*>& conflicting_clusters) const {
+      const Tx& tx, const unordered_set<const Cluster*>& conflicting_clusters,
+      bool& packed) {
     vector<Cluster> new_clusters;
     new_clusters.reserve(clusters_.size());
     for (const auto& cluster : clusters_) {
@@ -147,22 +156,52 @@ class Stage {
     for (const auto* cluster : conflicting_clusters) {
       new_clusters.back().merge(*cluster);
     }
-    sort(new_clusters.begin(), new_clusters.end(),
-         [](const auto& a, const auto& b) { return a.insns > b.insns; });
+
+    if (new_clusters.back().insns > cfg_.insns_per_thread) {
+      return new_clusters;
+    }
+
+    for (const auto& cluster : conflicting_clusters) {
+      bin_insns_[cluster->bin_id] -= cluster->insns;
+      packing_[cluster->bin_id].inplaceDifference(cluster->txs);
+    }
+
+    packed = false;
+
+    for (int bin_id = 0; bin_id < cfg_.threads_per_stage; ++bin_id) {
+      if (bin_insns_[bin_id] + new_clusters.back().insns <=
+          cfg_.insns_per_thread) {
+        bin_insns_[bin_id] += new_clusters.back().insns;
+        packing_[bin_id].inplaceUnion(new_clusters.back().txs);
+        new_clusters.back().bin_id = bin_id;
+        packed = true;
+        break;
+      }
+    }
+    if (!packed) {
+      for (const auto& cluster : conflicting_clusters) {
+        bin_insns_[cluster->bin_id] += cluster->insns;
+        packing_[cluster->bin_id].inplaceUnion(cluster->txs);
+      }
+    }
+
     return new_clusters;
   }
 
-  vector<BitSet> binPacking(const vector<Cluster>& clusters,
-                                 vector<int>& bin_insns) const {
+  vector<BitSet> binPacking(vector<Cluster>& clusters,
+                            vector<int>& bin_insns) const {
+    sort(clusters.begin(), clusters.end(),
+         [](const auto& a, const auto& b) { return a.insns > b.insns; });
     const int bin_count = cfg_.threads_per_stage;
     vector<BitSet> bins(bin_count);
     bin_insns.resize(bin_count);
-    for (const auto& cluster : clusters) {
+    for (auto& cluster : clusters) {
       bool packed = false;
       for (int i = 0; i < bin_count; ++i) {
         if (bin_insns[i] + cluster.insns <= cfg_.insns_per_thread) {
           bin_insns[i] += cluster.insns;
           bins[i].inplaceUnion(cluster.txs);
+          cluster.bin_id = i;
           packed = true;
           break;
         }
@@ -190,20 +229,11 @@ TxSet partition(vector<Tx>& txs, PartitionConfig cfg) {
   vector<Stage> stages(cfg.stage_count, cfg);
 
   for (const auto& tx : txs) {
-    int min_conflicting_insns = numeric_limits<int>::max();
-    Stage* best_stage = nullptr;
     for (auto& stage : stages) {
-      auto maybe_conflicting_insns = stage.tryAdd(tx, true);
-      if (maybe_conflicting_insns &&
-          *maybe_conflicting_insns < min_conflicting_insns) {
-        min_conflicting_insns = *maybe_conflicting_insns;
-        best_stage = &stage;
+      if (stage.tryAdd(tx)) {
         break;
       }
     }
-    // if (best_stage != nullptr) {
-    //   best_stage->tryAdd(tx, true);
-    // }
   }
   unordered_map<int, const Tx*> tx_map;
   for (const auto& tx : txs) {
@@ -215,7 +245,7 @@ TxSet partition(vector<Tx>& txs, PartitionConfig cfg) {
     auto stage_txs = stage.getPerThreadTxs();
     for (const auto& thread : stage_txs) {
       auto& tx_set_thread = tx_set_stage.txs.emplace_back();
-       for (size_t tx_id = 0; thread.nextSet(tx_id); ++tx_id) {
+      for (size_t tx_id = 0; thread.nextSet(tx_id); ++tx_id) {
         tx_set_thread.push_back(*tx_map[tx_id]);
         tx_map.erase(tx_id);
       }
@@ -235,7 +265,7 @@ TxSet partition(vector<Tx>& txs, PartitionConfig cfg) {
 }
 
 const int64_t INSNS_PER_THREAD = 500'000'000;
-const int64_t THREADS = 8;
+const int64_t THREADS = 16;
 const int64_t INSNS_PER_LEDGER = 2 * INSNS_PER_THREAD * THREADS;
 
 struct Conflict {
@@ -304,7 +334,6 @@ vector<Tx> generatePredefinedConflicts(PredefinedConflictsConfig const& config,
     generateConflict(from_id, ro_count, rw_count);
     from_id += ro_count + rw_count;
   }
-
   return res;
 }
 
@@ -325,9 +354,11 @@ PredefinedConflictsConfig predefinedConflicts(
 void smokeTest(PartitionConfig cfg) {
   int64_t generated_insns = 0;
   // Oracles
-  auto txs = generatePredefinedConflicts(
-      predefinedConflicts(10, 50, 5, {Conflict(0.9, 0.0)}), generated_insns,
-      123);
+  // auto txs = generatePredefinedConflicts(
+  //    predefinedConflicts(50, 50, 1, {Conflict(0.9, 0.0)}), generated_insns,
+  //    123);
+  auto txs = generatePredefinedConflicts(predefinedConflicts(25, 50, 1, {}),
+                                         generated_insns, rand());
   // Arbitrage
   // auto txs = generatePredefinedConflicts(
   //   predefinedConflicts(10, 50, 5, {Conflict(0.0, 0.8)}), generated_insns,
@@ -352,6 +383,7 @@ void smokeTest(PartitionConfig cfg) {
     cout << "Utilization: "
          << 100.0 * (generated_insns - insns_left) / cfg.maxInsns() << endl;
     ++iter;
+    break;
   }
   cout << "Total iter: " << iter << endl;
 }
@@ -497,8 +529,10 @@ int main() {
 
   // randomTrafficBenchmarks();
   //  randomTrafficBenchmarksRw();
-  oracleBenchmarks();
-  arbitrageBenchmarks();
+  // oracleBenchmarks();
+  // arbitrageBenchmarks();
 
-  // smokeTest(partitionConfig(4));
+  for (int i = 0; i < 10; ++i) {
+    smokeTest(partitionConfig(4));
+  }
 }

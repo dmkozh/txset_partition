@@ -18,5 +18,19 @@
     <ClCompile Include="txset_partition.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="cbitset.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="BitSet.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="cbitset.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="cbitset_portability.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

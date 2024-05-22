@@ -131,7 +131,13 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="cbitset.c" />
     <ClCompile Include="txset_partition.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="BitSet.h" />
+    <ClInclude Include="cbitset.h" />
+    <ClInclude Include="cbitset_portability.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
